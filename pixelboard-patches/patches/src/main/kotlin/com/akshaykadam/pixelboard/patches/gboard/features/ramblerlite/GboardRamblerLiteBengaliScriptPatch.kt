@@ -159,20 +159,20 @@ private fun MutableMethod.findEnabledLanguagesReplace(): ReplaceSite {
     val placeholderSite = constStringSites()
         .firstOrNull { it.third == ENABLED_LANGUAGES_PLACEHOLDER }
         ?: error("$ENABLED_LANGUAGES_PLACEHOLDER const not found; fail-closed")
-    for (index in placeholderSite.first + 1 until instructions.size()) {
+    for (index in placeholderSite.first + 1 until instructions.size) {
         val instruction = instructions[index]
         if (instruction is Instruction35c &&
             instruction.reference.toString() == STRING_REPLACE_DESCRIPTOR &&
             instruction.registerCount == 3 &&
             instruction.registerD == placeholderSite.second
         ) {
-            for (j in index + 1 until minOf(index + 4, instructions.size())) {
+            for (j in index + 1 until minOf(index + 4, instructions.size)) {
                 val move = instructions[j]
                 if (move is Instruction11x &&
                     move.opcode.name == "move-result-object"
                 ) {
                     return ReplaceSite(
-                        invokeIndex = j,
+                        invokeIndex = index,
                         moveResultIndex = j,
                         languagesRegister = instruction.registerE,
                         resultRegister = move.registerA,
@@ -186,8 +186,9 @@ private fun MutableMethod.findEnabledLanguagesReplace(): ReplaceSite {
 }
 
 private fun MutableMethod.installBengaliScriptHooks(ruleRegister: Int) {
-    val promptCall = RuntimeCallId.RAMBLER_LITE_RUNTIME_REWRITE_CLEANUP_PROMPT
-    val ruleCall = RuntimeCallId.RAMBLER_LITE_RUNTIME_SELECT_HINGLISH_OVERRIDE
+    val stageCall = RuntimeCallId.RAMBLER_LITE_RUNTIME_STAGE_ENABLED_LANGUAGES
+    val promptCall = RuntimeCallId.RAMBLER_LITE_RUNTIME_REWRITE_CLEANUP_PROMPT_STAGED
+    val ruleCall = RuntimeCallId.RAMBLER_LITE_RUNTIME_SELECT_HINGLISH_OVERRIDE_STAGED
     val site = findEnabledLanguagesReplace()
     val instructions = implementation?.instructions
         ?: error("No implementation in $definingClass->$name")
@@ -207,47 +208,36 @@ private fun MutableMethod.installBengaliScriptHooks(ruleRegister: Int) {
             "and extend the profile)"
     }
 
-    // Three fresh locals: vSave keeps the enabled-languages value alive until
-    // the override-rule site (a later const-string may clobber the original
-    // register); vT0/vT1 are the contiguous invoke pair.
-    //
-    // INTEGRATION NOTE: PixelBoard's shared MutableMethod rebases parameter
-    // registers when registerCount grows (same contract the smali assembler
-    // gives .locals). This exact allocation is validated end-to-end by the
-    // standalone smali patcher + fixture test-suite (tests/run_tests.sh);
-    // if the shared helper's rebasing differs, use the standalone route.
-    val impl = implementation!!
-    val base = impl.registerCount
-    impl.registerCount = base + 3
-    val vSave = "v$base"
-    val vT0 = "v${base + 1}"
-    val vT1 = "v${base + 2}"
+    // No new registers are needed: every hook is a single-argument
+    // invoke-static/range on a register that already holds the value, and the
+    // enabled-languages string travels between hooks in a per-thread slot.
+    // Insert from the highest index down so earlier indexes stay valid.
 
-    // Hook B: at the stock override-rule const load, pick the rule text from
-    // enabled languages (native Indic -> preservation rule, explicit -Latn ->
-    // stock rule, non-Indic -> dropped, unknown -> stock).
+    // Hook B: after the stock override-rule const load, pick the rule text.
     addInstructions(
         ruleSiteIndex + 1,
         """
-            move-object/from16 $vT0, v$ruleRegister
-            move-object/from16 $vT1, $vSave
-            invoke-static/range {$vT0 .. $vT1}, ${RuntimeAbiCatalog.abi(ruleCall).reference}
-            move-result-object $vT0
-            move-object/from16 v$ruleRegister, $vT0
+            invoke-static/range {v$ruleRegister .. v$ruleRegister}, ${RuntimeAbiCatalog.abi(ruleCall).reference}
+            move-result-object v$ruleRegister
         """.trimIndent(),
     )
 
-    // Hook A: right after the {ENABLED_LANGUAGES} substitution, save the
-    // languages value and gate the SCRIPT GATE Branch A on native Indic tags.
+    // Hook A: right after the {ENABLED_LANGUAGES} substitution, gate the
+    // SCRIPT GATE Branch A on native Indic tags.
     addInstructions(
         site.moveResultIndex + 1,
         """
-            move-object/from16 $vSave, v${site.languagesRegister}
-            move-object/from16 $vT0, v${site.resultRegister}
-            move-object/from16 $vT1, v${site.languagesRegister}
-            invoke-static/range {$vT0 .. $vT1}, ${RuntimeAbiCatalog.abi(promptCall).reference}
-            move-result-object $vT0
-            move-object/from16 v${site.resultRegister}, $vT0
+            invoke-static/range {v${site.resultRegister} .. v${site.resultRegister}}, ${RuntimeAbiCatalog.abi(promptCall).reference}
+            move-result-object v${site.resultRegister}
+        """.trimIndent(),
+    )
+
+    // Hook 0: just BEFORE the String.replace invoke, while the enabled-
+    // languages register still holds its value (the move-result may reuse it).
+    addInstructions(
+        site.invokeIndex,
+        """
+            invoke-static/range {v${site.languagesRegister} .. v${site.languagesRegister}}, ${RuntimeAbiCatalog.abi(stageCall).reference}
         """.trimIndent(),
     )
 }

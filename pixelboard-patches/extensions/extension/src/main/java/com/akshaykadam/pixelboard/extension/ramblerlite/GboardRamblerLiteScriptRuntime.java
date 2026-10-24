@@ -173,6 +173,30 @@ public final class GboardRamblerLiteScriptRuntime {
             + prompt.substring(end);
     }
 
+    /** Per-thread copy of the enabled-languages string seen by the hooked builder. */
+    private static final ThreadLocal<String> STAGED_LANGUAGES = new ThreadLocal<String>();
+
+    /**
+     * Hook 0, inserted before the {ENABLED_LANGUAGES} String.replace: remembers
+     * the enabled-languages value. Single-argument on purpose, so the patch
+     * needs no extra registers.
+     */
+    public static void stageEnabledLanguages(String enabledLanguages) {
+        STAGED_LANGUAGES.set(enabledLanguages);
+    }
+
+    /** Hook A (single argument): SCRIPT GATE rewrite using the staged languages. */
+    public static String rewriteCleanupPromptStaged(String prompt) {
+        return rewriteCleanupPromptScriptGate(prompt, STAGED_LANGUAGES.get());
+    }
+
+    /** Hook B (single argument): override-rule selection; consumes the staged value. */
+    public static String selectHinglishOverrideRuleStaged(String stockRule) {
+        String languages = STAGED_LANGUAGES.get();
+        STAGED_LANGUAGES.remove();
+        return selectHinglishOverrideRule(stockRule, languages);
+    }
+
     private static String buildNativeBranchABlock(String enabledLanguages) {
         String langs = enabledLanguages == null ? "" : enabledLanguages.trim();
         return
