@@ -70,11 +70,10 @@ private object RamblerLiteBengaliTargets {
     )
 }
 
-private const val HINGLISH_OVERRIDE_SHA256 =
-    "a024513458b73f915c78438cea2a9457b9c5aed28da3644030c3dc76cd0ac6e9"
 private const val LITE_CLEANUP_PROMPT_SHA256 =
     "347a9484392763d5fb16660bc3ca9bbceb1851c96f2024f96c1e9327f504696e"
 private const val ENABLED_LANGUAGES_PLACEHOLDER = "{ENABLED_LANGUAGES}"
+private const val HINGLISH_PLACEHOLDER = "{HINGLISH_OVERRIDE_RULE}"
 private const val STRING_REPLACE_DESCRIPTOR =
     "Ljava/lang/String;->replace(Ljava/lang/CharSequence;" +
         "Ljava/lang/CharSequence;)Ljava/lang/String;"
@@ -106,9 +105,7 @@ internal val gboardRamblerLiteBengaliScriptPatch = bytecodePatch(
         // Structural gates. The exact prompt text differs between 18.3.1
         // builds, so the pinned hashes are only logged, never required.
         promptOwner.checkLitePromptMarkers()
-        val ruleSite = builder.findHinglishOverrideRule()
-
-        builder.installBengaliScriptHooks(ruleSite)
+        builder.installBengaliScriptHooks()
     }
 }
 
@@ -134,7 +131,6 @@ private val LITE_PROMPT_MARKERS = listOf(
     "Mandatory Indic Romanization (Anti-Gravity Gate)",
     "Universal Latin",
 )
-private const val HINGLISH_OVERRIDE_PREFIX = "3. Hinglish Override"
 
 private fun MutableMethod.checkLitePromptMarkers() {
     val log = Logger.getLogger("RamblerBangla")
@@ -159,26 +155,6 @@ private fun MutableMethod.checkLitePromptMarkers() {
                 "(sha256=$digest); proceeding on structural markers",
         )
     }
-}
-
-/** The stock Hinglish override rule const in the builder, or null if this build has none. */
-private fun MutableMethod.findHinglishOverrideRule(): Triple<Int, Int, String>? {
-    val matches = constStringSites().filter { site ->
-        sha256(site.third) == HINGLISH_OVERRIDE_SHA256 ||
-            site.third.startsWith(HINGLISH_OVERRIDE_PREFIX)
-    }
-    check(matches.size <= 1) {
-        "Expected at most one Hinglish override rule constant in " +
-            "$definingClass->$name, found ${matches.size}; aborting fail-closed"
-    }
-    if (matches.isEmpty()) {
-        Logger.getLogger("RamblerBangla").warning(
-            "Rambler Bangla: no stock Hinglish override rule constant in this build; " +
-                "Hook B skipped (the SCRIPT GATE rewrite still applies)",
-        )
-        return null
-    }
-    return matches.single()
 }
 
 private data class ReplaceSite(
@@ -221,7 +197,32 @@ private fun MutableMethod.findEnabledLanguagesReplace(): ReplaceSite {
     error("No String.replace consuming $ENABLED_LANGUAGES_PLACEHOLDER; fail-closed")
 }
 
-private fun MutableMethod.installBengaliScriptHooks(ruleSite: Triple<Int, Int, String>?) {
+private data class RuleReplaceSite(
+    val invokeIndex: Int,
+    val ruleRegister: Int,
+)
+
+/** Find `.replace("{HINGLISH_OVERRIDE_RULE}", rule)`; null if this build has none. */
+private fun MutableMethod.findHinglishRuleReplace(): RuleReplaceSite? {
+    val instructions = implementation?.instructions ?: return null
+    val placeholder = constStringSites()
+        .firstOrNull { it.third == HINGLISH_PLACEHOLDER }
+        ?: return null
+    for (index in placeholder.first + 1 until instructions.size) {
+        val instruction = instructions[index]
+        if (instruction is Instruction35c &&
+            instruction.reference.toString() == STRING_REPLACE_DESCRIPTOR &&
+            instruction.registerCount == 3 &&
+            instruction.registerD == placeholder.second
+        ) {
+            return RuleReplaceSite(index, instruction.registerE)
+        }
+    }
+    return null
+}
+
+private fun MutableMethod.installBengaliScriptHooks() {
+    val log = Logger.getLogger("RamblerBangla")
     val stageCall = RuntimeCallId.RAMBLER_LITE_RUNTIME_STAGE_ENABLED_LANGUAGES
     val promptCall = RuntimeCallId.RAMBLER_LITE_RUNTIME_REWRITE_CLEANUP_PROMPT_STAGED
     val ruleCall = RuntimeCallId.RAMBLER_LITE_RUNTIME_SELECT_HINGLISH_OVERRIDE_STAGED
@@ -235,13 +236,23 @@ private fun MutableMethod.installBengaliScriptHooks(ruleSite: Triple<Int, Int, S
         "Bengali script hooks already installed; aborting instead of double-patching"
     }
 
-    if (ruleSite != null) {
-        check(ruleSite.first > site.moveResultIndex) {
-            "This build loads the Hinglish override before the " +
-                "$ENABLED_LANGUAGES_PLACEHOLDER substitution; anchor order " +
-                "unsupported, aborting fail-closed (run the standalone analyzer " +
-                "and extend the profile)"
-        }
+    // Hook B is optional. It hooks the use of the stock override rule (the
+    // String.replace of the rule placeholder), not the load of the rule
+    // const, so it works however the const load is ordered. It needs the
+    // staged languages, hence it must come after the languages substitution.
+    val foundRuleReplace = findHinglishRuleReplace()
+    val ruleReplace = foundRuleReplace?.takeIf { it.invokeIndex > site.moveResultIndex }
+    if (ruleReplace == null) {
+        log.warning(
+            if (foundRuleReplace == null) {
+                "Rambler Bangla: no String.replace of $HINGLISH_PLACEHOLDER found; " +
+                    "override-rule hook skipped (the SCRIPT GATE rewrite still applies)"
+            } else {
+                "Rambler Bangla: the override rule is substituted before the " +
+                    "$ENABLED_LANGUAGES_PLACEHOLDER substitution; override-rule hook " +
+                    "skipped (the SCRIPT GATE rewrite still applies)"
+            },
+        )
     }
 
     // No new registers are needed: every hook is a single-argument
@@ -249,12 +260,11 @@ private fun MutableMethod.installBengaliScriptHooks(ruleSite: Triple<Int, Int, S
     // enabled-languages string travels between hooks in a per-thread slot.
     // Insert from the highest index down so earlier indexes stay valid.
 
-    // Hook B (only when the build has the stock rule const): after the stock
-    // override-rule const load, pick the rule text.
-    if (ruleSite != null) {
-        val ruleRegister = ruleSite.second
+    // Hook B: just before the rule placeholder is replaced, pick the rule text.
+    if (ruleReplace != null) {
+        val ruleRegister = ruleReplace.ruleRegister
         addInstructions(
-            ruleSite.first + 1,
+            ruleReplace.invokeIndex,
             """
                 invoke-static/range {v$ruleRegister .. v$ruleRegister}, ${RuntimeAbiCatalog.abi(ruleCall).reference}
                 move-result-object v$ruleRegister
@@ -279,5 +289,11 @@ private fun MutableMethod.installBengaliScriptHooks(ruleSite: Triple<Int, Int, S
         """
             invoke-static/range {v${site.languagesRegister} .. v${site.languagesRegister}}, ${RuntimeAbiCatalog.abi(stageCall).reference}
         """.trimIndent(),
+    )
+
+    log.info(
+        "Rambler Bangla: hooks installed in $definingClass->$name " +
+            "(languages replace at ${site.invokeIndex}, override-rule hook " +
+            (if (ruleReplace != null) "at ${ruleReplace.invokeIndex}" else "skipped") + ")",
     )
 }
