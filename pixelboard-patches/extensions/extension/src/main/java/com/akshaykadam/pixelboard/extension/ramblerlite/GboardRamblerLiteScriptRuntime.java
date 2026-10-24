@@ -83,7 +83,7 @@ public final class GboardRamblerLiteScriptRuntime {
         }
         int nativeCount = 0;
         int latinCount = 0;
-        for (String raw : enabledLanguages.split("[,;\\s]+")) {
+        for (String raw : enabledLanguages.split("[^A-Za-z0-9_-]+")) {
             String tag = raw.trim().toLowerCase(Locale.ROOT).replace('_', '-');
             if (tag.isEmpty()) {
                 continue;
@@ -183,11 +183,31 @@ public final class GboardRamblerLiteScriptRuntime {
      */
     public static void stageEnabledLanguages(String enabledLanguages) {
         STAGED_LANGUAGES.set(enabledLanguages);
+        log("stage enabledLanguages=" + enabledLanguages);
+    }
+
+    /** Logcat diagnostics (tag RamblerBangla); must never affect dictation. */
+    private static void log(String message) {
+        try {
+            android.util.Log.i("RamblerBangla", message);
+        } catch (Throwable ignored) {
+            // Diagnostics only.
+        }
     }
 
     /** Hook A (single argument): SCRIPT GATE rewrite using the staged languages. */
     public static String rewriteCleanupPromptStaged(String prompt) {
-        return rewriteCleanupPromptScriptGate(prompt, STAGED_LANGUAGES.get());
+        String languages = STAGED_LANGUAGES.get();
+        String result = rewriteCleanupPromptScriptGate(prompt, languages);
+        log("rewrite languages=" + languages
+            + " policy=" + classifyEnabledLanguages(languages)
+            + " promptLen=" + (prompt == null ? -1 : prompt.length())
+            + " hasBranchA=" + (prompt != null && prompt.contains(BRANCH_A_BULLET_START))
+            + " hasHinglishOverride=" + (prompt != null && prompt.contains("Hinglish Override"))
+            + " changed=" + (result != null && !result.equals(prompt))
+            + " head=" + (prompt == null ? ""
+                : prompt.substring(0, Math.min(40, prompt.length())).replace('\n', ' ')));
+        return result;
     }
 
     /** Hook B (single argument): override-rule selection; consumes the staged value. */
