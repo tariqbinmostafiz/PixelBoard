@@ -16,6 +16,7 @@ import com.google.gson.GsonBuilder
 import com.google.gson.JsonObject
 import com.akshaykadam.pixelboard.patches.gboard.features.advancedvoice.gboardAdvancedVoiceFeatureMarkerPatch
 import com.akshaykadam.pixelboard.patches.gboard.features.packagerename.applyGboardApplicationDisplayName
+import com.akshaykadam.pixelboard.patches.gboard.features.ramblerlite.gboardRamblerLiteBengaliScriptPatch
 import com.akshaykadam.pixelboard.patches.gboard.features.packagerename.gboardPackageRenameResourcePatch
 import com.akshaykadam.pixelboard.patches.gboard.features.packagerename.isValidGboardAppDisplayName
 import com.akshaykadam.pixelboard.patches.gboard.features.signaturebypass.gboardSignatureBypassBytecodePatch
@@ -60,6 +61,7 @@ val gboardAdvancedVoiceTypingPatch = gboardPublicResourcePatch(
     dependsOn(
         gboardPatchesSettingsPatch,
         gboardAdvancedVoiceFeatureMarkerPatch,
+        gboardRamblerLiteBengaliScriptPatch,
     )
 }
 
