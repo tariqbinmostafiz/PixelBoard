@@ -19,16 +19,21 @@ jobs:
           java-version: '21'
       - uses: android-actions/setup-android@v4
       - run: chmod +x pixelboard-patches/gradlew
-      - name: Build .mpp
-        working-directory: pixelboard-patches
-        run: ./gradlew :patches:buildAndroid --stacktrace
-      - name: Tests (informational)
-        if: always()
+      - name: Tests (informational, must run BEFORE the Android build)
         continue-on-error: true
         working-directory: pixelboard-patches
         run: ./gradlew test --continue
+      - name: Build Android .mpp (adds classes.dex)
+        working-directory: pixelboard-patches
+        run: ./gradlew :patches:buildAndroid --stacktrace
+      - name: Verify classes.dex is inside the bundle
+        working-directory: pixelboard-patches
+        run: |
+          f=$(ls patches/build/libs/patches-*.mpp | grep -v -e javadoc -e sources | head -n 1)
+          echo "bundle: $f"
+          unzip -l "$f" | grep -E "classes.dex|ramblerlite"
+          unzip -l "$f" | grep -q "classes.dex"
       - uses: actions/upload-artifact@v4
-        if: always()
         with:
           name: pixelboard-rambler-mpp
-          path: pixelboard-patches/patches/build/libs/*.mpp
+          path: pixelboard-patches/patches/build/libs/patches-*.mpp
