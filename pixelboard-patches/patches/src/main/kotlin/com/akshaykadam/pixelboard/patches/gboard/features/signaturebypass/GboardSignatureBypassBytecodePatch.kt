@@ -32,6 +32,12 @@ private const val SIGNATURE_UTILS_CLASS = "Lrpv;"
 private const val SIGNATURE_UTILS_CLASS_1831 = "Lajpz;"
 private const val SIGNATURE_UTILS_CLASS_1831_RELEASE = "Lrvl;"
 private const val SIGNATURE_UTILS_CLASS_1841_RELEASE = "Lryi;"
+private val SIGNATURE_UTILS_CANDIDATES = listOf(
+    SIGNATURE_UTILS_CLASS_1841_RELEASE,
+    SIGNATURE_UTILS_CLASS_1831_RELEASE,
+    SIGNATURE_UTILS_CLASS_1831,
+    SIGNATURE_UTILS_CLASS,
+)
 
 internal val gboardSignatureBypassBytecodePatch = bytecodePatch(
     description = "Force bypass Gboard signature whitelist checks."
@@ -45,16 +51,17 @@ internal val gboardSignatureBypassBytecodePatch = bytecodePatch(
 
 context(context: BytecodePatchContext)
 private fun injectSignatureBypass() = with(context) {
-    val targetClass = when {
-        mutableClassDefByOrNull(SIGNATURE_UTILS_CLASS_1841_RELEASE) != null -> SIGNATURE_UTILS_CLASS_1841_RELEASE
-        mutableClassDefByOrNull(SIGNATURE_UTILS_CLASS_1831_RELEASE) != null -> SIGNATURE_UTILS_CLASS_1831_RELEASE
-        mutableClassDefByOrNull(SIGNATURE_UTILS_CLASS_1831) != null -> SIGNATURE_UTILS_CLASS_1831
-        else -> SIGNATURE_UTILS_CLASS
-    }
-    mutableClass(targetClass)
-        .methods
-        .findGboardSignatureBypassTargetOrThrow()
-        .applyGboardSignatureBypass()
+    // Obfuscated class names are reused across Gboard builds, so a class that
+    // merely exists under a candidate name (e.g. Lryi; in 18.3.1 beta) is not
+    // necessarily the signature utility. Take the first candidate that really
+    // holds exactly one matching target method.
+    val target = SIGNATURE_UTILS_CANDIDATES
+        .filter { mutableClassDefByOrNull(it) != null }
+        .map { mutableClass(it).methods.filter(MutableMethod::isExactGboardSignatureBypassTarget) }
+        .firstOrNull { it.size == 1 }
+        ?.single()
+        ?: error("Expected exactly one signature bypass target, found 0 in all candidate classes")
+    target.applyGboardSignatureBypass()
 }
 
 internal fun Iterable<MutableMethod>.findGboardSignatureBypassTargetOrThrow(): MutableMethod {

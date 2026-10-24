@@ -103,15 +103,12 @@ internal val gboardRamblerLiteBengaliScriptPatch = bytecodePatch(
         checkNotNull(builder) { "Rambler Lite cleanup builder kfd.d not found; aborting fail-closed" }
         checkNotNull(promptOwner) { "Rambler Lite prompt owner kew.b not found; aborting fail-closed" }
 
-        // Fingerprint gates: both stock constants must exist verbatim.
-        promptOwner.requireConstStringFingerprint(
-            LITE_CLEANUP_PROMPT_SHA256, "Lite cleanup prompt",
-        )
-        val ruleRegister = builder.findConstStringFingerprint(
-            HINGLISH_OVERRIDE_SHA256, "Hinglish override rule",
-        )
+        // Structural gates. The exact prompt text differs between 18.3.1
+        // builds, so the pinned hashes are only logged, never required.
+        promptOwner.checkLitePromptMarkers()
+        val ruleSite = builder.findHinglishOverrideRule()
 
-        builder.installBengaliScriptHooks(ruleRegister)
+        builder.installBengaliScriptHooks(ruleSite)
     }
 }
 
@@ -132,17 +129,56 @@ private fun MutableMethod.constStringSites() =
         }
     } ?: error("No implementation in $definingClass->$name")
 
-private fun MutableMethod.requireConstStringFingerprint(expected: String, label: String) {
-    findConstStringFingerprint(expected, label)
+private const val LITE_PROMPT_PREFIX = "<system_role>"
+private val LITE_PROMPT_MARKERS = listOf(
+    "Mandatory Indic Romanization (Anti-Gravity Gate)",
+    "Universal Latin",
+)
+private const val HINGLISH_OVERRIDE_PREFIX = "3. Hinglish Override"
+
+private fun MutableMethod.checkLitePromptMarkers() {
+    val log = Logger.getLogger("RamblerBangla")
+    val matches = constStringSites().filter { site ->
+        site.third.startsWith(LITE_PROMPT_PREFIX) &&
+            LITE_PROMPT_MARKERS.all { marker -> site.third.contains(marker) }
+    }
+    if (matches.size != 1) {
+        log.warning(
+            "Rambler Bangla: expected one Lite cleanup prompt with the SCRIPT GATE " +
+                "Branch A markers in $definingClass->$name, found ${matches.size}; " +
+                "hooks still install and stay inert unless the prompt matches at runtime",
+        )
+        return
+    }
+    val digest = sha256(matches.single().third)
+    if (digest == LITE_CLEANUP_PROMPT_SHA256) {
+        log.info("Rambler Bangla: Lite cleanup prompt matches the profiled hash")
+    } else {
+        log.info(
+            "Rambler Bangla: Lite cleanup prompt differs from the profiled hash " +
+                "(sha256=$digest); proceeding on structural markers",
+        )
+    }
 }
 
-private fun MutableMethod.findConstStringFingerprint(expected: String, label: String): Int {
-    val matches = constStringSites().filter { sha256(it.third) == expected }
-    check(matches.size == 1) {
-        "Expected exactly one $label constant (sha256=$expected) in " +
+/** The stock Hinglish override rule const in the builder, or null if this build has none. */
+private fun MutableMethod.findHinglishOverrideRule(): Triple<Int, Int, String>? {
+    val matches = constStringSites().filter { site ->
+        sha256(site.third) == HINGLISH_OVERRIDE_SHA256 ||
+            site.third.startsWith(HINGLISH_OVERRIDE_PREFIX)
+    }
+    check(matches.size <= 1) {
+        "Expected at most one Hinglish override rule constant in " +
             "$definingClass->$name, found ${matches.size}; aborting fail-closed"
     }
-    return matches.single().second
+    if (matches.isEmpty()) {
+        Logger.getLogger("RamblerBangla").warning(
+            "Rambler Bangla: no stock Hinglish override rule constant in this build; " +
+                "Hook B skipped (the SCRIPT GATE rewrite still applies)",
+        )
+        return null
+    }
+    return matches.single()
 }
 
 private data class ReplaceSite(
@@ -185,7 +221,7 @@ private fun MutableMethod.findEnabledLanguagesReplace(): ReplaceSite {
     error("No String.replace consuming $ENABLED_LANGUAGES_PLACEHOLDER; fail-closed")
 }
 
-private fun MutableMethod.installBengaliScriptHooks(ruleRegister: Int) {
+private fun MutableMethod.installBengaliScriptHooks(ruleSite: Triple<Int, Int, String>?) {
     val stageCall = RuntimeCallId.RAMBLER_LITE_RUNTIME_STAGE_ENABLED_LANGUAGES
     val promptCall = RuntimeCallId.RAMBLER_LITE_RUNTIME_REWRITE_CLEANUP_PROMPT_STAGED
     val ruleCall = RuntimeCallId.RAMBLER_LITE_RUNTIME_SELECT_HINGLISH_OVERRIDE_STAGED
@@ -199,13 +235,13 @@ private fun MutableMethod.installBengaliScriptHooks(ruleRegister: Int) {
         "Bengali script hooks already installed; aborting instead of double-patching"
     }
 
-    val ruleSiteIndex = constStringSites()
-        .first { sha256(it.third) == HINGLISH_OVERRIDE_SHA256 }.first
-    check(ruleSiteIndex > site.moveResultIndex) {
-        "This build loads the Hinglish override before the " +
-            "$ENABLED_LANGUAGES_PLACEHOLDER substitution; anchor order " +
-            "unsupported, aborting fail-closed (run the standalone analyzer " +
-            "and extend the profile)"
+    if (ruleSite != null) {
+        check(ruleSite.first > site.moveResultIndex) {
+            "This build loads the Hinglish override before the " +
+                "$ENABLED_LANGUAGES_PLACEHOLDER substitution; anchor order " +
+                "unsupported, aborting fail-closed (run the standalone analyzer " +
+                "and extend the profile)"
+        }
     }
 
     // No new registers are needed: every hook is a single-argument
@@ -213,14 +249,18 @@ private fun MutableMethod.installBengaliScriptHooks(ruleRegister: Int) {
     // enabled-languages string travels between hooks in a per-thread slot.
     // Insert from the highest index down so earlier indexes stay valid.
 
-    // Hook B: after the stock override-rule const load, pick the rule text.
-    addInstructions(
-        ruleSiteIndex + 1,
-        """
-            invoke-static/range {v$ruleRegister .. v$ruleRegister}, ${RuntimeAbiCatalog.abi(ruleCall).reference}
-            move-result-object v$ruleRegister
-        """.trimIndent(),
-    )
+    // Hook B (only when the build has the stock rule const): after the stock
+    // override-rule const load, pick the rule text.
+    if (ruleSite != null) {
+        val ruleRegister = ruleSite.second
+        addInstructions(
+            ruleSite.first + 1,
+            """
+                invoke-static/range {v$ruleRegister .. v$ruleRegister}, ${RuntimeAbiCatalog.abi(ruleCall).reference}
+                move-result-object v$ruleRegister
+            """.trimIndent(),
+        )
+    }
 
     // Hook A: right after the {ENABLED_LANGUAGES} substitution, gate the
     // SCRIPT GATE Branch A on native Indic tags.
